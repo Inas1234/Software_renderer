@@ -53,3 +53,22 @@ static inline Mat4 mat4_perspective(float fovy_rad, float aspect, float znear, f
     r.m[14] = (2.0f * zfar * znear) / (znear - zfar);
     return r;
 }
+
+
+static inline Vec3 v3_sub(Vec3 a, Vec3 b){ Vec3 r={a.x-b.x, a.y-b.y, a.z-b.z}; return r; }
+static inline float v3_dot(Vec3 a, Vec3 b){ return a.x*b.x + a.y*b.y + a.z*b.z; }
+static inline Vec3 v3_cross(Vec3 a, Vec3 b){
+    Vec3 r={ a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x }; return r;
+}
+static inline Vec3 v3_norm(Vec3 v){
+    float len = sqrtf(v3_dot(v,v)); 
+    if (len > 0.0f){ float k = 1.0f/len; Vec3 r={v.x*k,v.y*k,v.z*k}; return r; }
+    return v;
+}
+static inline Vec3 mat3_mul_v3(Mat4 m, Vec3 v){
+    Vec3 r;
+    r.x = m.m[0]*v.x + m.m[4]*v.y + m.m[8] *v.z;
+    r.y = m.m[1]*v.x + m.m[5]*v.y + m.m[9] *v.z;
+    r.z = m.m[2]*v.x + m.m[6]*v.y + m.m[10]*v.z;
+    return r;
+}

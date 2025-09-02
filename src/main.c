@@ -49,29 +49,58 @@ void render_cube(Surface* s, float time_sec){
     depth_clear(s, 1e30f);
 
     float aspect = (float)s->width / (float)s->height;
-    Mat4 P = mat4_perspective(60.0f*(3.14159265f/180.0f), aspect, 0.1f, 100.0f);
-    Mat4 V = mat4_translation(0,0,-5);        
-    Mat4 M = mat4_rotation_y(time_sec*1.0f);  
-    Mat4 MVP = mat4_mul(P, mat4_mul(V, M));
+    Mat4 P  = mat4_perspective(60.0f*(3.14159265f/180.0f), aspect, 0.1f, 100.0f);
+    Mat4 V  = mat4_translation(0,0,-5);              
+    Mat4 M  = mat4_rotation_y(time_sec*1.0f);        
+    Mat4 MV = mat4_mul(V, M);
+    Mat4 MVP= mat4_mul(P, MV);
 
-    Vec4 clip[8];
+   
+    Vec3 L = v3_norm((Vec3){0.4f, 0.8f, -0.6f});
+    const float AMBIENT = 0.20f;     
+    const float DIFFUSE = 0.80f;
+
+    Vec4 clip[8], view4[8];
+    Vec3 view3[8];
     float sx[8], sy[8], z_over_w[8], q[8];
+
     for (int i=0;i<8;++i){
-        Vec4 v = vec4(CUBE_V[i].pos.x, CUBE_V[i].pos.y, CUBE_V[i].pos.z, 1.0f);
-        Vec4 c = mat4_mul_v4(MVP, v);
-        clip[i] = c;
-        float invw = 1.0f / c.w;
-        float x_ndc = c.x * invw;
-        float y_ndc = c.y * invw;
-        float z_ndc = c.z * invw;  
+        Vec4 vM = vec4(CUBE_V[i].pos.x, CUBE_V[i].pos.y, CUBE_V[i].pos.z, 1.0f);
+        Vec4 vV = mat4_mul_v4(MV,  vM);    
+        Vec4 vC = mat4_mul_v4(P,   vV);    
+
+        view4[i] = vV; view3[i] = (Vec3){vV.x, vV.y, vV.z};
+        clip[i]  = vC;
+
+        float invw = 1.0f / vC.w;
+        float x_ndc = vC.x * invw;
+        float y_ndc = vC.y * invw;
+        float z_ndc = vC.z * invw;  
         q[i] = invw;
         z_over_w[i] = z_ndc;
+
         ndc_to_screen(x_ndc, y_ndc, s->width, s->height, &sx[i], &sy[i]);
     }
 
     for (int f=0; f<12; ++f){
         int i0 = CUBE_TRI[f][0], i1 = CUBE_TRI[f][1], i2 = CUBE_TRI[f][2];
-        Color32 col = FACE_COL[f/2];
+
+        Vec3 p0 = view3[i0], p1 = view3[i1], p2 = view3[i2];
+        Vec3 e1 = v3_sub(p1, p0);
+        Vec3 e2 = v3_sub(p2, p0);
+        Vec3 n  = v3_cross(e1, e2);          
+
+        if (n.z >= 0.0f) continue;
+
+        Vec3 nN = v3_norm(n);
+        float ndotl = v3_dot(nN, L);
+        if (ndotl < 0.0f) ndotl = 0.0f;
+        float shade = AMBIENT + DIFFUSE * ndotl;
+
+        Color32 base = FACE_COL[f/2];
+        Color32 col  = color_scale(base, shade);
+
+        if (clip[i0].w <= 0 || clip[i1].w <= 0 || clip[i2].w <= 0) continue;
 
         tri_fill_persp_z(
             s,
