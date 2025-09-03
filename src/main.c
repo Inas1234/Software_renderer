@@ -27,15 +27,12 @@ static inline void ndc_to_screen(float x_ndc, float y_ndc, int W, int H, float* 
 
 
 void renderer_draw_object(Surface* s, const SceneObject* object, const Mat4* V, const Mat4* P) {
-    // --- Matrix Setup ---
     Mat4 M = transform_get_matrix(&object->transform);
-    Mat4 V_M = mat4_mul(*V, M);   // Renamed from MV for clarity
-    Mat4 P_VM = mat4_mul(*P, V_M); // Renamed from MVP
+    Mat4 VM = mat4_mul(*V, M);
+    Mat4 PVM = mat4_mul(*P, VM);
 
-    // --- Vertex Transformation ---
     int num_verts = object->mesh->num_vertices;
-    // We now need vertices in WORLD space for lighting, and CLIP space for rasterization.
-    Vec3* world_space_verts = (Vec3*)malloc(num_verts * sizeof(Vec3));
+    Vec3* world_space_normals = (Vec3*)malloc(num_verts * sizeof(Vec3));
     Vec4* clip_space_verts = (Vec4*)malloc(num_verts * sizeof(Vec4));
     float* sx = (float*)malloc(num_verts * sizeof(float));
     float* sy = (float*)malloc(num_verts * sizeof(float));
@@ -43,72 +40,53 @@ void renderer_draw_object(Surface* s, const SceneObject* object, const Mat4* V, 
     float* q = (float*)malloc(num_verts * sizeof(float));
 
     for (int i = 0; i < num_verts; ++i) {
-        Vec4 vM = vec4(object->mesh->vertices[i].pos.x, object->mesh->vertices[i].pos.y, object->mesh->vertices[i].pos.z, 1.0f);
+        Vec4 v_model = vec4(object->mesh->vertices[i].pos.x, object->mesh->vertices[i].pos.y, object->mesh->vertices[i].pos.z, 1.0f);
+        Vec3 n_model = object->mesh->vertices[i].normal;
         
-        // 1. Transform to World Space (for lighting)
-        Vec4 v_world_4 = mat4_mul_v4(M, vM);
-        world_space_verts[i] = (Vec3){v_world_4.x, v_world_4.y, v_world_4.z};
-        
-        // 2. Transform to Clip Space (for rasterization)
-        Vec4 v_clip = mat4_mul_v4(P_VM, vM);
-        clip_space_verts[i] = v_clip;
+        world_space_normals[i] = v3_norm(mat3_mul_v3(M, n_model));
 
-        // 3. Perspective divide and map to screen
-        float invw = 1.0f / v_clip.w;
-        ndc_to_screen(v_clip.x * invw, v_clip.y * invw, s->width, s->height, &sx[i], &sy[i]);
-        z_over_w[i] = v_clip.z * invw;
-        q[i] = invw;
+        clip_space_verts[i] = mat4_mul_v4(PVM, v_model);
+
+        q[i] = 1.0f / clip_space_verts[i].w;
+        ndc_to_screen(clip_space_verts[i].x * q[i], clip_space_verts[i].y * q[i], s->width, s->height, &sx[i], &sy[i]);
+        z_over_w[i] = clip_space_verts[i].z * q[i];
     }
 
-    // --- Lighting Setup (in World Space) ---
-    // The direction the light rays are traveling.
-    Vec3 light_direction = v3_norm((Vec3){0.4f, 0.8f, -0.6f});
-    const float AMBIENT = 0.15f;
-    const float DIFFUSE = 0.85f;
+    Vec3 light_direction = v3_norm((Vec3){0.5f, 1.0f, -0.75f});
+    const float AMBIENT = 0.2f;
+    const float DIFFUSE = 0.8f;
+    Color32 base_color = object->base_color;
 
-    // --- Triangle Processing ---
     for (int f = 0; f < object->mesh->num_faces; ++f) {
-        int i0_idx = f * 3 + 0;
-        int i1_idx = f * 3 + 1;
-        int i2_idx = f * 3 + 2;
-        
-        int i0 = object->mesh->indices[i0_idx];
-        int i1 = object->mesh->indices[i1_idx];
-        int i2 = object->mesh->indices[i2_idx];
+        int i0 = object->mesh->indices[f * 3 + 0];
+        int i1 = object->mesh->indices[f * 3 + 1];
+        int i2 = object->mesh->indices[f * 3 + 2];
 
-        // Backface Culling in Clip Space (faster and simpler)
-        float signed_area = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0]) - (sx[i2] - sx[i0]) * (sy[i1] - sy[i0]);
-        if (signed_area >= 0) continue;
-
-        // --- Lighting Calculation (now in World Space) ---
-        Vec3 p0_world = world_space_verts[i0];
-        Vec3 p1_world = world_space_verts[i1];
-        Vec3 p2_world = world_space_verts[i2];
+        // float signed_area = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0]) - (sx[i2] - sx[i0]) * (sy[i1] - sy[i0]);
+        // if (signed_area >= 0) continue;
         
-        Vec3 n_world = v3_cross(v3_sub(p1_world, p0_world), v3_sub(p2_world, p0_world));
-        Vec3 n_world_norm = v3_norm(n_world);
-        
-        // We need the vector FROM the surface TO the light, so we negate the light's direction vector.
-        float ndotl = v3_dot(n_world_norm, vec3(-light_direction.x, -light_direction.y, -light_direction.z));
-        
-        if (ndotl < 0.0f) ndotl = 0.0f; // Light doesn't illuminate from behind
-        float shade = AMBIENT + DIFFUSE * ndotl;
-
-        Color32 base = object->mesh->face_colors[f/2];
-        Color32 col = color_scale(base, shade);
-
-        // Simple clipping check
         if (clip_space_verts[i0].w <= 0.1f || clip_space_verts[i1].w <= 0.1f || clip_space_verts[i2].w <= 0.1f) continue;
+        
+        float shade0 = AMBIENT + DIFFUSE * fmaxf(0.0f, v3_dot(world_space_normals[i0], vec3(-light_direction.x, -light_direction.y, -light_direction.z)));
+        float shade1 = AMBIENT + DIFFUSE * fmaxf(0.0f, v3_dot(world_space_normals[i1], vec3(-light_direction.x, -light_direction.y, -light_direction.z)));
+        float shade2 = AMBIENT + DIFFUSE * fmaxf(0.0f, v3_dot(world_space_normals[i2], vec3(-light_direction.x, -light_direction.y, -light_direction.z)));
 
-        tri_fill_persp_z(s,
-            sx[i0], sy[i0], z_over_w[i0], q[i0],
-            sx[i1], sy[i1], z_over_w[i1], q[i1],
-            sx[i2], sy[i2], z_over_w[i2], q[i2],
-            col);
+        Color32 c0 = color_scale(base_color, shade0);
+        Color32 c1 = color_scale(base_color, shade1);
+        Color32 c2 = color_scale(base_color, shade2);
+
+        float r0ow = c0.r * q[i0], g0ow = c0.g * q[i0], b0ow = c0.b * q[i0];
+        float r1ow = c1.r * q[i1], g1ow = c1.g * q[i1], b1ow = c1.b * q[i1];
+        float r2ow = c2.r * q[i2], g2ow = c2.g * q[i2], b2ow = c2.b * q[i2];
+
+        tri_fill_persp_gouraud(s,
+            sx[i0], sy[i0], q[i0], z_over_w[i0], r0ow, g0ow, b0ow,
+            sx[i1], sy[i1], q[i1], z_over_w[i1], r1ow, g1ow, b1ow,
+            sx[i2], sy[i2], q[i2], z_over_w[i2], r2ow, g2ow, b2ow
+        );
     }
     
-    // Free allocated memory
-    free(world_space_verts);
+    free(world_space_normals);
     free(clip_space_verts);
     free(sx); free(sy); free(z_over_w); free(q);
 }
@@ -118,17 +96,19 @@ Mesh* g_cube_mesh = NULL;
 
 
 void init_scene() {
-    g_cube_mesh = mesh_create_cube(); 
+    g_cube_mesh = mesh_create_cube();
 
     g_cubes[0].mesh = g_cube_mesh;
     g_cubes[0].transform.position = (Vec3){-1.5f, 0.0f, 0.0f};
     g_cubes[0].transform.rotation = (Vec3){0.0f, 0.0f, 0.0f};
     g_cubes[0].transform.scale = (Vec3){1.0f, 1.0f, 1.0f};
+    g_cubes[0].base_color = RGB8(60, 150, 220); 
 
     g_cubes[1].mesh = g_cube_mesh;
     g_cubes[1].transform.position = (Vec3){1.5f, 0.0f, 0.0f};
     g_cubes[1].transform.rotation = (Vec3){0.0f, 0.0f, 0.0f};
-    g_cubes[1].transform.scale = (Vec3){0.7f, 0.7f, 0.7f}; 
+    g_cubes[1].transform.scale = (Vec3){0.7f, 0.7f, 0.7f};
+    g_cubes[1].base_color = RGB8(220, 90, 60);
 }
 
 void render_the_scene(Surface* s, float time_sec) {

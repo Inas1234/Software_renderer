@@ -4,12 +4,12 @@
 
 typedef struct {
     Vec3 pos;
+    Vec3 normal;
 } Vertex;
 
 typedef struct {
     Vertex* vertices;
     int*    indices;
-    Color32* face_colors; 
 
     int num_vertices;
     int num_indices;

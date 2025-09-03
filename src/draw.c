@@ -398,3 +398,98 @@ void tri_fill_persp_z(
         E0_row += dE0dy; E1_row += dE1dy; E2_row += dE2dy;
     }
 }
+
+
+
+// In draw.c
+
+void tri_fill_persp_gouraud(
+    Surface* s,
+    float x0, float y0, float q0, float z0ow, float r0ow, float g0ow, float b0ow,
+    float x1, float y1, float q1, float z1ow, float r1ow, float g1ow, float b1ow,
+    float x2, float y2, float q2, float z2ow, float r2ow, float g2ow, float b2ow)
+{
+    float area = edge_fn(x0,y0,x1,y1,x2,y2);
+    if (area == 0.0f) return;
+
+    if (area < 0.0f) {
+        float tx, ty, tq, tz, tr, tg, tb;
+        tx=x1; x1=x2; x2=tx;
+        ty=y1; y1=y2; y2=ty;
+        tq=q1; q1=q2; q2=tq;
+        tz=z1ow; z1ow=z2ow; z2ow=tz;
+        tr=r1ow; r1ow=r2ow; r2ow=tr;
+        tg=g1ow; g1ow=g2ow; g2ow=tg;
+        tb=b1ow; b1ow=b2ow; b2ow=tb;
+        area = -area;
+    }
+
+
+    int w = s->width, h = s->height;
+    int pitch_px = s->stride / 4;
+    float minx_f = floorf(fminf(x0, fminf(x1, x2)));
+    float miny_f = floorf(fminf(y0, fminf(y1, y2)));
+    float maxx_f = ceilf (fmaxf(x0, fmaxf(x1, x2)));
+    float maxy_f = ceilf (fmaxf(y0, fmaxf(y1, y2)));
+    int minx = (int)fmaxf(0.0f, minx_f);
+    int miny = (int)fmaxf(0.0f, miny_f);
+    int maxx = (int)fminf((float)w, maxx_f);
+    int maxy = (int)fminf((float)h, maxy_f);
+    if (minx >= maxx || miny >= maxy) return;
+    
+    float invArea = 1.0f / area;
+
+    int tl0 = is_top_left(x1,y1,x2,y2);
+    int tl1 = is_top_left(x2,y2,x0,y0);
+    int tl2 = is_top_left(x0,y0,x1,y1);
+    float b0 = tl0 ? 0.0f : 1e-6f;
+    float b1 = tl1 ? 0.0f : 1e-6f;
+    float b2 = tl2 ? 0.0f : 1e-6f;
+
+    float px0 = (float)minx + 0.5f;
+    float py0 = (float)miny + 0.5f;
+    float A0x = x1 - x2, A0y = y1 - y2;
+    float A1x = x2 - x0, A1y = y2 - y0;
+    float A2x = x0 - x1, A2y = y0 - y1;
+    float E0_row = edge_fn(x1,y1, x2,y2, px0, py0);
+    float E1_row = edge_fn(x2,y2, x0,y0, px0, py0);
+    float E2_row = edge_fn(x0,y0, x1,y1, px0, py0);
+    float dE0dx = (y1 - y2), dE0dy = (x2 - x1);
+    float dE1dx = (y2 - y0), dE1dy = (x0 - x2);
+    float dE2dx = (y0 - y1), dE2dy = (x1 - x0);
+
+    for (int y = miny; y < maxy; ++y) {
+        float E0 = E0_row, E1 = E1_row, E2 = E2_row;
+        Color32* rowC = s->pixels + y * pitch_px;
+        float*   rowZ = s->depth ? (s->depth + y * w) : NULL;
+
+        for (int x = minx; x < maxx; ++x) {
+            if (E0 >= -b0 && E1 >= -b1 && E2 >= -b2) {
+                float w0 = E0 * invArea, w1 = E1 * invArea, w2 = E2 * invArea;
+                
+                float q_interp = w0*q0 + w1*q1 + w2*q2;
+                if (q_interp > 0.0f) {
+                    float z_ndc = (w0*z0ow + w1*z1ow + w2*z2ow) / q_interp;
+                    if (!rowZ || z_ndc < rowZ[x]) {
+                        if (rowZ) rowZ[x] = z_ndc;
+                        
+                        float invQ = 1.0f / q_interp;
+                        float r = (w0*r0ow + w1*r1ow + w2*r2ow) * invQ;
+                        float g = (w0*g0ow + w1*g1ow + w2*g2ow) * invQ;
+                        float b = (w0*b0ow + w1*b1ow + w2*b2ow) * invQ;
+
+                        Color32 out = {
+                            (uint8_t)fminf(fmaxf(b, 0.f), 255.f),
+                            (uint8_t)fminf(fmaxf(g, 0.f), 255.f),
+                            (uint8_t)fminf(fmaxf(r, 0.f), 255.f),
+                            255
+                        };
+                        rowC[x] = out;
+                    }
+                }
+            }
+            E0 += dE0dx; E1 += dE1dx; E2 += dE2dx;
+        }
+        E0_row += dE0dy; E1_row += dE1dy; E2_row += dE2dy;
+    }
+}
