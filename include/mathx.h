@@ -72,3 +72,26 @@ static inline Vec3 mat3_mul_v3(Mat4 m, Vec3 v){
     r.z = m.m[2]*v.x + m.m[6]*v.y + m.m[10]*v.z;
     return r;
 }
+
+
+
+
+static inline Mat4 mat4_scaling(float sx, float sy, float sz){
+    Mat4 r = { .m = {sx,0,0,0,  0,sy,0,0,  0,0,sz,0,  0,0,0,1} };
+    return r;
+}
+
+static inline Mat4 mat4_rotation_x(float a){
+    float c = cosf(a), s = sinf(a);
+ 
+    Mat4 r = { .m = {1,0,0,0,  0,c,s,0,  0,-s,c,0,  0,0,0,1} };
+    return r;
+}
+
+static inline Mat4 mat4_rotation_z(float a){
+    float c = cosf(a), s = sinf(a);
+ 
+    Mat4 r = { .m = {c,s,0,0,  -s,c,0,0,  0,0,1,0,  0,0,0,1} };
+    return r;
+}
+

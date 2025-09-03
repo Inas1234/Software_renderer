@@ -11,6 +11,8 @@
 #include "draw.h"
 #include "color.h"
 #include "mathx.h"
+#include "scene.h"
+
 #define WIDTH 800
 #define HEIGHT 600
 
@@ -18,99 +20,134 @@ Surface g_surf = { WIDTH, HEIGHT, WIDTH*4, NULL };
 static HBITMAP g_backBmp = NULL;
 static HDC     g_memDC   = NULL;
 
-typedef struct { Vec3 pos; } Vtx;
-
-static const Vtx CUBE_V[8] = {
-    {{-1,-1,-1}}, {{ 1,-1,-1}}, {{ 1, 1,-1}}, {{-1, 1,-1}}, 
-    {{-1,-1, 1}}, {{ 1,-1, 1}}, {{ 1, 1, 1}}, {{-1, 1, 1}}, 
-};
-
-static const int CUBE_TRI[12][3] = {
-    {0,1,2},{0,2,3}, 
-    {4,6,5},{4,7,6}, 
-    {0,4,5},{0,5,1}, 
-    {3,2,6},{3,6,7}, 
-    {1,5,6},{1,6,2}, 
-    {0,3,7},{0,7,4}, 
-};
-
-static const Color32 FACE_COL[6] = {
-    RGB8(220, 60, 60), RGB8(60, 220, 60), RGB8(60, 60, 220),
-    RGB8(220, 180, 60), RGB8(60, 200, 200), RGB8(200, 60, 200)
-};
-
 static inline void ndc_to_screen(float x_ndc, float y_ndc, int W, int H, float* outx, float* outy){
     *outx = (x_ndc * 0.5f + 0.5f) * (float)W;
-    *outy = (1.0f - (y_ndc * 0.5f + 0.5f)) * (float)H; 
+    *outy = (1.0f - (y_ndc * 0.5f + 0.5f)) * (float)H;
 }
 
-void render_cube(Surface* s, float time_sec){
-    clear(s, RGB8(20,20,24));
-    depth_clear(s, 1e30f);
 
-    float aspect = (float)s->width / (float)s->height;
-    Mat4 P  = mat4_perspective(60.0f*(3.14159265f/180.0f), aspect, 0.1f, 100.0f);
-    Mat4 V  = mat4_translation(0,0,-5);              
-    Mat4 M  = mat4_rotation_y(time_sec*1.0f);        
-    Mat4 MV = mat4_mul(V, M);
-    Mat4 MVP= mat4_mul(P, MV);
+void renderer_draw_object(Surface* s, const SceneObject* object, const Mat4* V, const Mat4* P) {
+    // --- Matrix Setup ---
+    Mat4 M = transform_get_matrix(&object->transform);
+    Mat4 V_M = mat4_mul(*V, M);   // Renamed from MV for clarity
+    Mat4 P_VM = mat4_mul(*P, V_M); // Renamed from MVP
 
-   
-    Vec3 L = v3_norm((Vec3){0.4f, 0.8f, -0.6f});
-    const float AMBIENT = 0.20f;     
-    const float DIFFUSE = 0.80f;
+    // --- Vertex Transformation ---
+    int num_verts = object->mesh->num_vertices;
+    // We now need vertices in WORLD space for lighting, and CLIP space for rasterization.
+    Vec3* world_space_verts = (Vec3*)malloc(num_verts * sizeof(Vec3));
+    Vec4* clip_space_verts = (Vec4*)malloc(num_verts * sizeof(Vec4));
+    float* sx = (float*)malloc(num_verts * sizeof(float));
+    float* sy = (float*)malloc(num_verts * sizeof(float));
+    float* z_over_w = (float*)malloc(num_verts * sizeof(float));
+    float* q = (float*)malloc(num_verts * sizeof(float));
 
-    Vec4 clip[8], view4[8];
-    Vec3 view3[8];
-    float sx[8], sy[8], z_over_w[8], q[8];
+    for (int i = 0; i < num_verts; ++i) {
+        Vec4 vM = vec4(object->mesh->vertices[i].pos.x, object->mesh->vertices[i].pos.y, object->mesh->vertices[i].pos.z, 1.0f);
+        
+        // 1. Transform to World Space (for lighting)
+        Vec4 v_world_4 = mat4_mul_v4(M, vM);
+        world_space_verts[i] = (Vec3){v_world_4.x, v_world_4.y, v_world_4.z};
+        
+        // 2. Transform to Clip Space (for rasterization)
+        Vec4 v_clip = mat4_mul_v4(P_VM, vM);
+        clip_space_verts[i] = v_clip;
 
-    for (int i=0;i<8;++i){
-        Vec4 vM = vec4(CUBE_V[i].pos.x, CUBE_V[i].pos.y, CUBE_V[i].pos.z, 1.0f);
-        Vec4 vV = mat4_mul_v4(MV,  vM);    
-        Vec4 vC = mat4_mul_v4(P,   vV);    
-
-        view4[i] = vV; view3[i] = (Vec3){vV.x, vV.y, vV.z};
-        clip[i]  = vC;
-
-        float invw = 1.0f / vC.w;
-        float x_ndc = vC.x * invw;
-        float y_ndc = vC.y * invw;
-        float z_ndc = vC.z * invw;  
+        // 3. Perspective divide and map to screen
+        float invw = 1.0f / v_clip.w;
+        ndc_to_screen(v_clip.x * invw, v_clip.y * invw, s->width, s->height, &sx[i], &sy[i]);
+        z_over_w[i] = v_clip.z * invw;
         q[i] = invw;
-        z_over_w[i] = z_ndc;
-
-        ndc_to_screen(x_ndc, y_ndc, s->width, s->height, &sx[i], &sy[i]);
     }
 
-    for (int f=0; f<12; ++f){
-        int i0 = CUBE_TRI[f][0], i1 = CUBE_TRI[f][1], i2 = CUBE_TRI[f][2];
+    // --- Lighting Setup (in World Space) ---
+    // The direction the light rays are traveling.
+    Vec3 light_direction = v3_norm((Vec3){0.4f, 0.8f, -0.6f});
+    const float AMBIENT = 0.15f;
+    const float DIFFUSE = 0.85f;
 
-        Vec3 p0 = view3[i0], p1 = view3[i1], p2 = view3[i2];
-        Vec3 e1 = v3_sub(p1, p0);
-        Vec3 e2 = v3_sub(p2, p0);
-        Vec3 n  = v3_cross(e1, e2);          
+    // --- Triangle Processing ---
+    for (int f = 0; f < object->mesh->num_faces; ++f) {
+        int i0_idx = f * 3 + 0;
+        int i1_idx = f * 3 + 1;
+        int i2_idx = f * 3 + 2;
+        
+        int i0 = object->mesh->indices[i0_idx];
+        int i1 = object->mesh->indices[i1_idx];
+        int i2 = object->mesh->indices[i2_idx];
 
-        if (n.z >= 0.0f) continue;
+        // Backface Culling in Clip Space (faster and simpler)
+        float signed_area = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0]) - (sx[i2] - sx[i0]) * (sy[i1] - sy[i0]);
+        if (signed_area >= 0) continue;
 
-        Vec3 nN = v3_norm(n);
-        float ndotl = v3_dot(nN, L);
-        if (ndotl < 0.0f) ndotl = 0.0f;
+        // --- Lighting Calculation (now in World Space) ---
+        Vec3 p0_world = world_space_verts[i0];
+        Vec3 p1_world = world_space_verts[i1];
+        Vec3 p2_world = world_space_verts[i2];
+        
+        Vec3 n_world = v3_cross(v3_sub(p1_world, p0_world), v3_sub(p2_world, p0_world));
+        Vec3 n_world_norm = v3_norm(n_world);
+        
+        // We need the vector FROM the surface TO the light, so we negate the light's direction vector.
+        float ndotl = v3_dot(n_world_norm, vec3(-light_direction.x, -light_direction.y, -light_direction.z));
+        
+        if (ndotl < 0.0f) ndotl = 0.0f; // Light doesn't illuminate from behind
         float shade = AMBIENT + DIFFUSE * ndotl;
 
-        Color32 base = FACE_COL[f/2];
-        Color32 col  = color_scale(base, shade);
+        Color32 base = object->mesh->face_colors[f/2];
+        Color32 col = color_scale(base, shade);
 
-        if (clip[i0].w <= 0 || clip[i1].w <= 0 || clip[i2].w <= 0) continue;
+        // Simple clipping check
+        if (clip_space_verts[i0].w <= 0.1f || clip_space_verts[i1].w <= 0.1f || clip_space_verts[i2].w <= 0.1f) continue;
 
-        tri_fill_persp_z(
-            s,
+        tri_fill_persp_z(s,
             sx[i0], sy[i0], z_over_w[i0], q[i0],
             sx[i1], sy[i1], z_over_w[i1], q[i1],
             sx[i2], sy[i2], z_over_w[i2], q[i2],
-            col
-        );
+            col);
     }
+    
+    // Free allocated memory
+    free(world_space_verts);
+    free(clip_space_verts);
+    free(sx); free(sy); free(z_over_w); free(q);
 }
+
+SceneObject g_cubes[2];
+Mesh* g_cube_mesh = NULL;
+
+
+void init_scene() {
+    g_cube_mesh = mesh_create_cube(); 
+
+    g_cubes[0].mesh = g_cube_mesh;
+    g_cubes[0].transform.position = (Vec3){-1.5f, 0.0f, 0.0f};
+    g_cubes[0].transform.rotation = (Vec3){0.0f, 0.0f, 0.0f};
+    g_cubes[0].transform.scale = (Vec3){1.0f, 1.0f, 1.0f};
+
+    g_cubes[1].mesh = g_cube_mesh;
+    g_cubes[1].transform.position = (Vec3){1.5f, 0.0f, 0.0f};
+    g_cubes[1].transform.rotation = (Vec3){0.0f, 0.0f, 0.0f};
+    g_cubes[1].transform.scale = (Vec3){0.7f, 0.7f, 0.7f}; 
+}
+
+void render_the_scene(Surface* s, float time_sec) {
+    clear(s, RGB8(20, 20, 24));
+    depth_clear(s, 1e30f);
+
+    g_cubes[0].transform.rotation.y = time_sec * 1.0f;
+    g_cubes[0].transform.rotation.x = time_sec * 0.5f;
+
+    g_cubes[1].transform.rotation.y = -time_sec * 0.8f;
+    
+    float aspect = (float)s->width / (float)s->height;
+    Mat4 P = mat4_perspective(60.0f * (3.14159265f / 180.0f), aspect, 0.1f, 100.0f);
+    Mat4 V = mat4_translation(0, 0, -7); 
+
+    renderer_draw_object(s, &g_cubes[0], &V, &P);
+    renderer_draw_object(s, &g_cubes[1], &V, &P);
+}
+
 
 static void init_bmi(void) {
     BITMAPINFO bmi = {0};
@@ -130,18 +167,7 @@ static void init_bmi(void) {
     depth_clear(&g_surf, 1e30f);
 }
 
-void render_scene(void){
-    clear(&g_surf, RGB8(20,20,24));
-    depth_clear(&g_surf, 1e30f); 
 
-    tri_fill_z_color(&g_surf, 120.0f, 60.0f,  5.0f, RGB8(255,0,0),    
-                               420.0f, 220.0f, 5.0f, RGB8(0,255,0),   
-                                60.0f, 300.0f, 5.0f, RGB8(0,0,255));  
-
-    tri_fill_z_color(&g_surf, 160.0f, 100.0f, 1.0f, RGB8(255,255,0),  
-                               460.0f, 260.0f, 1.0f, RGB8(0,255,255), 
-                               120.0f, 340.0f, 1.0f, RGB8(255,0,255));
-}
 
 static void present(HDC hdc, int dstW, int dstH) {
     if (dstW <= 0 || dstH <= 0) return;
@@ -187,6 +213,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         return 0;
     }
 
+    init_scene();
+
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);                
 
@@ -213,7 +241,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
             acc -= dt; t += dt;
         }
 
-        render_cube(&g_surf, (float)t);
+        render_the_scene(&g_surf, (float)t);
         // render_scene();                 
         InvalidateRect(hwnd, NULL, FALSE);
 
@@ -237,7 +265,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
     case WM_CREATE:
         init_bmi();
-        render_scene();
         InvalidateRect(hwnd, NULL, FALSE); 
         return 0;
 
